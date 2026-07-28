@@ -29,7 +29,7 @@ type DepositoConfirmado struct {
 	// campos específicos do depósito confirmado
 
 	DepositoID string `json:"deposito_id"`
-	BalanceID  string `json:"balance_id"`
+	UserID  string `json:"user_id"`
 	Valor      int64  `json:"valor"`
 	Moeda      string `json:"moeda"`
 }
@@ -86,7 +86,7 @@ func conectarBanco() (*db.Queries, error) {
 	return db.New(pool), nil
 }
 
-func creditarNaBlnk(deposito DepositoConfirmado) error {
+func creditarNaBlnk(deposito DepositoConfirmado, balanceID string) error {
 	transacao := TransacaoBlnk{
 		Amount:         deposito.Valor,
 		Precision:      1,
@@ -94,7 +94,7 @@ func creditarNaBlnk(deposito DepositoConfirmado) error {
 		Description:    "Depósito confirmado, id: " + deposito.DepositoID,
 		Currency:       deposito.Moeda,
 		Source:         "@Mundo",
-		Destination:    deposito.BalanceID,
+		Destination:    balanceID,
 		AllowOverdraft: true,
 		SkipQueue:      true,
 	}
@@ -169,13 +169,33 @@ func main() {
 			c.JSON(400, gin.H{"error": "json invalido"})
 			return
 		}
-		fmt.Printf("Deposito recebido: id=%s, balance=%s, valor=%d, moeda=%s\n",
-			evento.Data.DepositoID, evento.Data.BalanceID, evento.Data.Valor, evento.Data.Moeda)
-		if err := creditarNaBlnk(evento.Data); err != nil {
-			fmt.Println("erro ao creditar:", err)
-			c.JSON(500, gin.H{"erro": "falha ao creditar"})
+
+		deposito := evento.Data
+		fmt.Printf("Deposito recebido: id=%s, user=%s, valor=%d, moeda=%s\n",
+			deposito.DepositoID, deposito.UserID, deposito.Valor, deposito.Moeda)
+
+		// 1. busca a conta do usuário
+		conta, err := queries.BuscarContaPorUsuario(c.Request.Context(), deposito.UserID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// usuário sem conta: rejeita (pragmático — loga e não faz loop)
+			fmt.Println("REJEITADO: deposito para usuario sem conta:", deposito.UserID)
+			c.JSON(200, gin.H{"status": "SUCCESS"})  // SUCCESS pro Dapr parar; erro registrado no log
 			return
 		}
+		if err != nil {
+			// erro de verdade na busca
+			fmt.Println("erro ao buscar conta:", err)
+			c.JSON(500, gin.H{"status": "RETRY"})
+			return
+		}
+
+		// 2. credita no balance encontrado
+		if err := creditarNaBlnk(deposito, conta.BalanceID); err != nil {
+			fmt.Println("erro ao creditar:", err)
+			c.JSON(500, gin.H{"status": "RETRY"})
+			return
+		}
+
 		c.JSON(200, gin.H{"status": "SUCCESS"})
 	})
 
