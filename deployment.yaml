@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pam
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pam
+  template:
+    metadata:
+      labels:
+        app: pam
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "pam"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+        - name: pam
+          image: pam:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+            - name: pam
+          image: pam:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pam-secrets
+                  key: DATABASE_URL
+            - name: BLNK_LEDGER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: pam-secrets
+                  key: BLNK_LEDGER_ID
+
+        

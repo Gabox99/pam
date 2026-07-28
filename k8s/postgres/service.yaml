@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pam-postgres
+spec:
+  selector:
+    app: pam-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
