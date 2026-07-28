@@ -66,12 +66,12 @@ type TransacaoBlnk struct {
 func daprSubscribe() []map[string]string {
 	return []map[string]string{{
 		"pubsubname": "pubsub",
-		"topic":      "deposito.confirmado",
+		"topic":      "pam.deposito.confirmado",
 		"route":      "/deposito-confirmado",
 	},
 		{
 			"pubsubname": "pubsub",
-			"topic":      "conta.criada",
+			"topic":      "pam.conta.criada",
 			"route":      "/conta-criada",
 		},
 	}
