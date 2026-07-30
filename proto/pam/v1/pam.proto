@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package pam.v1;
+
+option go_package = "github.com/Gabox99/pam/gen/pam/v1;pamv1";
+
+// O serviço PAM — as operações que ele oferece via gRPC
+service PamService {
+  // Consulta o saldo de um usuário
+  rpc ConsultarSaldo(ConsultarSaldoRequest) returns (ConsultarSaldoResponse);
+}
+
+// A requisição: quem quer saber o saldo informa o user_id
+message ConsultarSaldoRequest {
+  string user_id = 1;
+}
+
+// A resposta: o saldo do usuário
+message ConsultarSaldoResponse {
+  int64 saldo = 1;
+  string moeda = 2;
+}

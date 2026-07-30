@@ -14,9 +14,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool" // novo
 
-	"errors"                              // stdlib, pro errors.Is e errors.As
-	"github.com/jackc/pgx/v5"             // pro pgx.ErrNoRows
-	"github.com/jackc/pgx/v5/pgconn"      // pro pgconn.PgError
+	"errors" // stdlib, pro errors.Is e errors.As
+
+	"github.com/jackc/pgx/v5"        // pro pgx.ErrNoRows
+	"github.com/jackc/pgx/v5/pgconn" // pro pgconn.PgError
+
+	pamv1 "github.com/Gabox99/pam/gen/pam/v1" // o pacote pamv1 gerado
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+
+	"net"
+
+	"google.golang.org/grpc"
 )
 
 type EventoEnvelope struct {
@@ -29,7 +39,7 @@ type DepositoConfirmado struct {
 	// campos específicos do depósito confirmado
 
 	DepositoID string `json:"deposito_id"`
-	UserID  string `json:"user_id"`
+	UserID     string `json:"user_id"`
 	Valor      int64  `json:"valor"`
 	Moeda      string `json:"moeda"`
 }
@@ -61,6 +71,58 @@ type TransacaoBlnk struct {
 	Destination    string `json:"destination"`
 	AllowOverdraft bool   `json:"allow_overdraft"`
 	SkipQueue      bool   `json:"skip_queue"`
+}
+
+type SaldoBlnkResp struct {
+	Balance  int64  `json:"balance"`
+	Currency string `json:"currency"`
+}
+
+type pamServer struct {
+	pamv1.UnimplementedPamServiceServer
+	queries *db.Queries
+}
+
+func consultarSaldoNaBlnk(balanceID string) (int64, string, error) {
+	resp, err := http.Get("http://blnk:5001/balances/" + balanceID)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		corpoResp, _ := io.ReadAll(resp.Body)
+		return 0, "", fmt.Errorf("blnk retornou status %d ao consultar saldo: %s", resp.StatusCode, string(corpoResp))
+	}
+
+	var saldoResp SaldoBlnkResp
+	if err := json.NewDecoder(resp.Body).Decode(&saldoResp); err != nil {
+		return 0, "", err
+	}
+	return saldoResp.Balance, saldoResp.Currency, nil
+}
+
+func (s *pamServer) ConsultarSaldo(ctx context.Context, req *pamv1.ConsultarSaldoRequest) (*pamv1.ConsultarSaldoResponse, error) {
+	// 1. busca a conta do usuário
+	conta, err := s.queries.BuscarContaPorUsuario(ctx, req.UserId)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, status.Errorf(codes.NotFound, "usuario sem conta: %s", req.UserId)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "erro ao buscar conta: %v", err)
+	}
+
+	// 2. consulta o saldo na Blnk
+	saldo, moeda, err := consultarSaldoNaBlnk(conta.BalanceID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "erro ao consultar saldo: %v", err)
+	}
+
+	// 3. retorna a resposta
+	return &pamv1.ConsultarSaldoResponse{
+		Saldo: saldo,
+		Moeda: moeda,
+	}, nil
 }
 
 func daprSubscribe() []map[string]string {
@@ -179,7 +241,7 @@ func main() {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// usuário sem conta: rejeita (pragmático — loga e não faz loop)
 			fmt.Println("REJEITADO: deposito para usuario sem conta:", deposito.UserID)
-			c.JSON(200, gin.H{"status": "SUCCESS"})  // SUCCESS pro Dapr parar; erro registrado no log
+			c.JSON(200, gin.H{"status": "SUCCESS"}) // SUCCESS pro Dapr parar; erro registrado no log
 			return
 		}
 		if err != nil {
@@ -255,5 +317,25 @@ func main() {
 		c.JSON(200, gin.H{"status": "SUCCESS"})
 	})
 
+	// --- servidor gRPC ---
+	go func() {
+		lis, err := net.Listen("tcp", ":50051")
+		if err != nil {
+			panic(err)
+		}
+
+		grpcServer := grpc.NewServer()
+		pamv1.RegisterPamServiceServer(grpcServer, &pamServer{queries: queries})
+		reflection.Register(grpcServer) // <- nova linha
+
+		fmt.Println("servidor gRPC ouvindo na porta 50051")
+		if err := grpcServer.Serve(lis); err != nil {
+			panic(err)
+		}
+
+	}()
+
+	// --- servidor HTTP (Gin) — bloqueia, mantém o programa vivo ---
 	r.Run(":8080")
+
 }
