@@ -1,14 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context" // novo
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os" // novo
-	"strings"
 
 	"github.com/Gabox99/pam/internal/db" // novo
 	"github.com/gin-gonic/gin"
@@ -26,6 +21,7 @@ import (
 
 	"net"
 
+	"github.com/Gabox99/pam/internal/blnk"
 	"google.golang.org/grpc"
 )
 
@@ -52,54 +48,10 @@ type EnvelopeContaCriada struct {
 	Data ContaCriada `json:"data"`
 }
 
-type CriarBalanceReq struct {
-	LedgerID string `json:"ledger_id"`
-	Currency string `json:"currency"`
-}
-
-type BalanceResp struct {
-	BalanceID string `json:"balance_id"`
-}
-
-type TransacaoBlnk struct {
-	Amount         int64  `json:"amount"`
-	Precision      int    `json:"precision"`
-	Reference      string `json:"reference"`
-	Description    string `json:"description"`
-	Currency       string `json:"currency"`
-	Source         string `json:"source"`
-	Destination    string `json:"destination"`
-	AllowOverdraft bool   `json:"allow_overdraft"`
-	SkipQueue      bool   `json:"skip_queue"`
-}
-
-type SaldoBlnkResp struct {
-	Balance  int64  `json:"balance"`
-	Currency string `json:"currency"`
-}
-
 type pamServer struct {
 	pamv1.UnimplementedPamServiceServer
-	queries *db.Queries
-}
-
-func consultarSaldoNaBlnk(balanceID string) (int64, string, error) {
-	resp, err := http.Get("http://blnk:5001/balances/" + balanceID)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		corpoResp, _ := io.ReadAll(resp.Body)
-		return 0, "", fmt.Errorf("blnk retornou status %d ao consultar saldo: %s", resp.StatusCode, string(corpoResp))
-	}
-
-	var saldoResp SaldoBlnkResp
-	if err := json.NewDecoder(resp.Body).Decode(&saldoResp); err != nil {
-		return 0, "", err
-	}
-	return saldoResp.Balance, saldoResp.Currency, nil
+	queries    *db.Queries
+	blnkClient *blnk.Client
 }
 
 func (s *pamServer) ConsultarSaldo(ctx context.Context, req *pamv1.ConsultarSaldoRequest) (*pamv1.ConsultarSaldoResponse, error) {
@@ -113,7 +65,8 @@ func (s *pamServer) ConsultarSaldo(ctx context.Context, req *pamv1.ConsultarSald
 	}
 
 	// 2. consulta o saldo na Blnk
-	saldo, moeda, err := consultarSaldoNaBlnk(conta.BalanceID)
+	// antes: saldo, moeda, err := consultarSaldoNaBlnk(conta.BalanceID)
+	saldo, moeda, err := s.blnkClient.ConsultarSaldo(conta.BalanceID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "erro ao consultar saldo: %v", err)
 	}
@@ -148,76 +101,15 @@ func conectarBanco() (*db.Queries, error) {
 	return db.New(pool), nil
 }
 
-func creditarNaBlnk(deposito DepositoConfirmado, balanceID string) error {
-	transacao := TransacaoBlnk{
-		Amount:         deposito.Valor,
-		Precision:      1,
-		Reference:      deposito.DepositoID,
-		Description:    "Depósito confirmado, id: " + deposito.DepositoID,
-		Currency:       deposito.Moeda,
-		Source:         "@Mundo",
-		Destination:    balanceID,
-		AllowOverdraft: true,
-		SkipQueue:      true,
-	}
-	corpo, err := json.Marshal(transacao)
-	if err != nil {
-		return err
-	}
-
-	resp, err := http.Post("http://blnk:5001/transactions", "application/json", bytes.NewBuffer(corpo))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil // sucesso
-	}
-
-	corpoResp, _ := io.ReadAll(resp.Body)
-	if strings.Contains(string(corpoResp), "has already been used") {
-		fmt.Println("deposito duplicado (já processado): ", deposito.DepositoID)
-		return nil // não é um erro, apenas ignoramos depósitos duplicados
-	}
-
-	return fmt.Errorf("blnk retornou status: %d: %s ", resp.StatusCode, string(corpoResp))
-}
-
-func criarBalanceNaBlnk() (string, error) {
-	corpoReq := CriarBalanceReq{
-		LedgerID: os.Getenv("BLNK_LEDGER_ID"),
-		Currency: "BRL",
-	}
-	corpo, err := json.Marshal(corpoReq)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := http.Post("http://blnk:5001/balances", "application/json", bytes.NewBuffer(corpo))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		corpoResp, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("blnk retornou status %d ao criar balance: %s", resp.StatusCode, string(corpoResp))
-	}
-
-	var balanceResp BalanceResp
-	if err := json.NewDecoder(resp.Body).Decode(&balanceResp); err != nil {
-		return "", err
-	}
-	return balanceResp.BalanceID, nil
-}
-
 func main() {
 
 	queries, err := conectarBanco()
 	if err != nil {
 		panic(err) // se não conecta no banco, não faz sentido continuar
 	}
+
+	// client da Blnk
+	blnkClient := blnk.New("http://blnk:5001", os.Getenv("BLNK_LEDGER_ID"))
 
 	r := gin.Default()
 
@@ -252,7 +144,9 @@ func main() {
 		}
 
 		// 2. credita no balance encontrado
-		if err := creditarNaBlnk(deposito, conta.BalanceID); err != nil {
+		// antes: if err := creditarNaBlnk(deposito, conta.BalanceID); err != nil {
+		descricao := "Depósito confirmado, id: " + deposito.DepositoID
+		if err := blnkClient.Creditar(conta.BalanceID, deposito.DepositoID, deposito.Valor, deposito.Moeda, descricao); err != nil {
 			fmt.Println("erro ao creditar:", err)
 			c.JSON(500, gin.H{"status": "RETRY"})
 			return
@@ -288,7 +182,8 @@ func main() {
 		// se chegou aqui, err == pgx.ErrNoRows → usuário novo, segue
 
 		// 2. cria o balance na Blnk
-		balanceID, err := criarBalanceNaBlnk()
+		// antes: balanceID, err := criarBalanceNaBlnk()
+		balanceID, err := blnkClient.CriarBalance("BRL")
 		if err != nil {
 			fmt.Println("erro ao criar balance:", err)
 			c.JSON(500, gin.H{"erro": "falha ao criar balance"})
@@ -325,7 +220,7 @@ func main() {
 		}
 
 		grpcServer := grpc.NewServer()
-		pamv1.RegisterPamServiceServer(grpcServer, &pamServer{queries: queries})
+		pamv1.RegisterPamServiceServer(grpcServer, &pamServer{queries: queries, blnkClient: blnkClient})
 		reflection.Register(grpcServer) // <- nova linha
 
 		fmt.Println("servidor gRPC ouvindo na porta 50051")
