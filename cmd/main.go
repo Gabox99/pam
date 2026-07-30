@@ -11,8 +11,7 @@ import (
 
 	"errors" // stdlib, pro errors.Is e errors.As
 
-	"github.com/jackc/pgx/v5"        // pro pgx.ErrNoRows
-	"github.com/jackc/pgx/v5/pgconn" // pro pgconn.PgError
+	// pro pgx.ErrNoRows
 
 	pamv1 "github.com/Gabox99/pam/gen/pam/v1" // o pacote pamv1 gerado
 	"google.golang.org/grpc/codes"
@@ -22,6 +21,8 @@ import (
 	"net"
 
 	"github.com/Gabox99/pam/internal/blnk"
+	"github.com/Gabox99/pam/internal/conta"
+	"github.com/Gabox99/pam/internal/deposito"
 	"google.golang.org/grpc"
 )
 
@@ -50,28 +51,18 @@ type EnvelopeContaCriada struct {
 
 type pamServer struct {
 	pamv1.UnimplementedPamServiceServer
-	queries    *db.Queries
-	blnkClient *blnk.Client
+	contaService *conta.Service
 }
 
 func (s *pamServer) ConsultarSaldo(ctx context.Context, req *pamv1.ConsultarSaldoRequest) (*pamv1.ConsultarSaldoResponse, error) {
-	// 1. busca a conta do usuário
-	conta, err := s.queries.BuscarContaPorUsuario(ctx, req.UserId)
-	if errors.Is(err, pgx.ErrNoRows) {
+	saldo, moeda, err := s.contaService.ConsultarSaldo(ctx, req.UserId)
+	if errors.Is(err, conta.ErrContaNaoEncontrada) {
 		return nil, status.Errorf(codes.NotFound, "usuario sem conta: %s", req.UserId)
 	}
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "erro ao buscar conta: %v", err)
-	}
-
-	// 2. consulta o saldo na Blnk
-	// antes: saldo, moeda, err := consultarSaldoNaBlnk(conta.BalanceID)
-	saldo, moeda, err := s.blnkClient.ConsultarSaldo(conta.BalanceID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "erro ao consultar saldo: %v", err)
 	}
 
-	// 3. retorna a resposta
 	return &pamv1.ConsultarSaldoResponse{
 		Saldo: saldo,
 		Moeda: moeda,
@@ -110,6 +101,8 @@ func main() {
 
 	// client da Blnk
 	blnkClient := blnk.New("http://blnk:5001", os.Getenv("BLNK_LEDGER_ID"))
+	contaService := conta.New(queries, blnkClient)
+	depositoService := deposito.New(queries, blnkClient)
 
 	r := gin.Default()
 
@@ -124,30 +117,17 @@ func main() {
 			return
 		}
 
-		deposito := evento.Data
-		fmt.Printf("Deposito recebido: id=%s, user=%s, valor=%d, moeda=%s\n",
-			deposito.DepositoID, deposito.UserID, deposito.Valor, deposito.Moeda)
+		d := evento.Data
+		err := depositoService.ProcessarDeposito(c.Request.Context(), d.DepositoID, d.UserID, d.Valor, d.Moeda)
 
-		// 1. busca a conta do usuário
-		conta, err := queries.BuscarContaPorUsuario(c.Request.Context(), deposito.UserID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// usuário sem conta: rejeita (pragmático — loga e não faz loop)
-			fmt.Println("REJEITADO: deposito para usuario sem conta:", deposito.UserID)
-			c.JSON(200, gin.H{"status": "SUCCESS"}) // SUCCESS pro Dapr parar; erro registrado no log
+		if errors.Is(err, deposito.ErrContaNaoEncontrada) {
+			// rejeição pragmática: loga e responde SUCCESS pro Dapr não retentar
+			fmt.Println("REJEITADO: deposito para usuario sem conta:", d.UserID)
+			c.JSON(200, gin.H{"status": "SUCCESS"})
 			return
 		}
 		if err != nil {
-			// erro de verdade na busca
-			fmt.Println("erro ao buscar conta:", err)
-			c.JSON(500, gin.H{"status": "RETRY"})
-			return
-		}
-
-		// 2. credita no balance encontrado
-		// antes: if err := creditarNaBlnk(deposito, conta.BalanceID); err != nil {
-		descricao := "Depósito confirmado, id: " + deposito.DepositoID
-		if err := blnkClient.Creditar(conta.BalanceID, deposito.DepositoID, deposito.Valor, deposito.Moeda, descricao); err != nil {
-			fmt.Println("erro ao creditar:", err)
+			fmt.Println("erro ao processar deposito:", err)
 			c.JSON(500, gin.H{"status": "RETRY"})
 			return
 		}
@@ -162,53 +142,12 @@ func main() {
 			return
 		}
 
-		userID := evento.Data.UserID
-		fmt.Println("Conta criada recebida para user:", userID)
-
-		// 1. verifica se a conta já existe (idempotência)
-		_, err := queries.BuscarContaPorUsuario(c.Request.Context(), userID)
-		if err == nil {
-			// achou: conta já existe, nada a fazer
-			fmt.Println("conta já existe, ignorando:", userID)
-			c.JSON(200, gin.H{"status": "SUCCESS"})
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			// erro de verdade na busca (não é "não achou")
-			fmt.Println("erro ao buscar conta:", err)
-			c.JSON(500, gin.H{"erro": "falha ao buscar conta"})
-			return
-		}
-		// se chegou aqui, err == pgx.ErrNoRows → usuário novo, segue
-
-		// 2. cria o balance na Blnk
-		// antes: balanceID, err := criarBalanceNaBlnk()
-		balanceID, err := blnkClient.CriarBalance("BRL")
-		if err != nil {
-			fmt.Println("erro ao criar balance:", err)
-			c.JSON(500, gin.H{"erro": "falha ao criar balance"})
+		if err := contaService.CriarConta(c.Request.Context(), evento.Data.UserID); err != nil {
+			fmt.Println("erro ao criar conta:", err)
+			c.JSON(500, gin.H{"status": "RETRY"})
 			return
 		}
 
-		// 3. grava o mapeamento no banco
-		_, err = queries.CriarConta(c.Request.Context(), db.CriarContaParams{
-			UserID:    userID,
-			BalanceID: balanceID,
-		})
-		if err != nil {
-			// rede de segurança: corrida de concorrência (23505)
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				fmt.Println("conta duplicada (corrida):", userID)
-				c.JSON(200, gin.H{"status": "SUCCESS"})
-				return
-			}
-			fmt.Println("erro ao gravar conta:", err)
-			c.JSON(500, gin.H{"erro": "falha ao gravar conta"})
-			return
-		}
-
-		fmt.Printf("Conta criada: user=%s, balance=%s\n", userID, balanceID)
 		c.JSON(200, gin.H{"status": "SUCCESS"})
 	})
 
@@ -220,7 +159,7 @@ func main() {
 		}
 
 		grpcServer := grpc.NewServer()
-		pamv1.RegisterPamServiceServer(grpcServer, &pamServer{queries: queries, blnkClient: blnkClient})
+		pamv1.RegisterPamServiceServer(grpcServer, &pamServer{contaService: contaService})
 		reflection.Register(grpcServer) // <- nova linha
 
 		fmt.Println("servidor gRPC ouvindo na porta 50051")
