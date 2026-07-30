@@ -7,6 +7,7 @@
 package pamv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -21,7 +22,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// A requisição: quem quer saber o saldo informa o user_id
 type ConsultarSaldoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
@@ -66,7 +66,6 @@ func (x *ConsultarSaldoRequest) GetUserId() string {
 	return ""
 }
 
-// A resposta: o saldo do usuário
 type ConsultarSaldoResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Saldo         int64                  `protobuf:"varint,1,opt,name=saldo,proto3" json:"saldo,omitempty"`
@@ -123,15 +122,15 @@ var File_pam_v1_pam_proto protoreflect.FileDescriptor
 
 const file_pam_v1_pam_proto_rawDesc = "" +
 	"\n" +
-	"\x10pam/v1/pam.proto\x12\x06pam.v1\"0\n" +
+	"\x10pam/v1/pam.proto\x12\x06pam.v1\x1a\x1cgoogle/api/annotations.proto\"0\n" +
 	"\x15ConsultarSaldoRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"D\n" +
 	"\x16ConsultarSaldoResponse\x12\x14\n" +
 	"\x05saldo\x18\x01 \x01(\x03R\x05saldo\x12\x14\n" +
-	"\x05moeda\x18\x02 \x01(\tR\x05moeda2]\n" +
+	"\x05moeda\x18\x02 \x01(\tR\x05moeda2z\n" +
 	"\n" +
-	"PamService\x12O\n" +
-	"\x0eConsultarSaldo\x12\x1d.pam.v1.ConsultarSaldoRequest\x1a\x1e.pam.v1.ConsultarSaldoResponseB)Z'github.com/Gabox99/pam/gen/pam/v1;pamv1b\x06proto3"
+	"PamService\x12l\n" +
+	"\x0eConsultarSaldo\x12\x1d.pam.v1.ConsultarSaldoRequest\x1a\x1e.pam.v1.ConsultarSaldoResponse\"\x1b\x82\xd3\xe4\x93\x02\x15\x12\x13/v1/saldo/{user_id}B)Z'github.com/Gabox99/pam/gen/pam/v1;pamv1b\x06proto3"
 
 var (
 	file_pam_v1_pam_proto_rawDescOnce sync.Once

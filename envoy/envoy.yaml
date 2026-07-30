@@ -1,0 +1,64 @@
+# Envoy config — transcoding REST↔gRPC pro PAM
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+  # interface de admin do Envoy (métricas, config dump) — útil pra debug
+
+static_resources:
+  listeners:
+    - name: listener_http
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+        # a porta REST que o front/cliente chama (o Envoy escuta aqui)
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: grpc_json
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: pam_service
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: pam_grpc }
+                          # toda requisição vai pro cluster pam_grpc (o PAM)
+                http_filters:
+                  # AQUI está a mágica do transcoding:
+                  - name: envoy.filters.http.grpc_json_transcoder
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                      proto_descriptor: "/etc/envoy/descriptor.pb"
+                      # o descriptor que geramos — o Envoy lê o contrato daqui
+                      services:
+                        - "pam.v1.PamService"
+                        # qual serviço gRPC transcodificar
+                      print_options:
+                        add_whitespace: true
+                        always_print_primitive_fields: true
+                        # formata o JSON de resposta de forma legível
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: pam_grpc
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+            # gRPC usa HTTP/2 — isso diz ao Envoy pra falar HTTP/2 com o PAM
+      load_assignment:
+        cluster_name: pam_grpc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: pam           # o Service do PAM no k8s
+                      port_value: 50051      # a porta gRPC do PAM

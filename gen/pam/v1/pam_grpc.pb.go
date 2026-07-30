@@ -8,7 +8,6 @@ package pamv1
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -26,10 +25,7 @@ const (
 // PamServiceClient is the client API for PamService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// O serviço PAM — as operações que ele oferece via gRPC
 type PamServiceClient interface {
-	// Consulta o saldo de um usuário
 	ConsultarSaldo(ctx context.Context, in *ConsultarSaldoRequest, opts ...grpc.CallOption) (*ConsultarSaldoResponse, error)
 }
 
@@ -54,10 +50,7 @@ func (c *pamServiceClient) ConsultarSaldo(ctx context.Context, in *ConsultarSald
 // PamServiceServer is the server API for PamService service.
 // All implementations must embed UnimplementedPamServiceServer
 // for forward compatibility.
-//
-// O serviço PAM — as operações que ele oferece via gRPC
 type PamServiceServer interface {
-	// Consulta o saldo de um usuário
 	ConsultarSaldo(context.Context, *ConsultarSaldoRequest) (*ConsultarSaldoResponse, error)
 	mustEmbedUnimplementedPamServiceServer()
 }

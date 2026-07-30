@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy
+  template:
+    metadata:
+      labels:
+        app: envoy
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.31-latest
+          ports:
+            - containerPort: 8080   # a porta REST (listener)
+            - containerPort: 9901   # a admin
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              # monta o ConfigMap aqui — vira /etc/envoy/envoy.yaml e /etc/envoy/descriptor.pb
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            # diz ao Envoy pra usar nossa config
+      volumes:
+        - name: config
+          configMap:
+            name: envoy-config
